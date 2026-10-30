@@ -28,6 +28,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import memory
@@ -333,6 +334,123 @@ class Ledger(unittest.TestCase):
             else:
                 os.environ[memory.LEDGER_PATH_ENV] = previous
         self.assertEqual(len(memory.read_runs("notion.so", self.path)), 1)
+
+
+NOW = datetime(2026, 10, 30, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def stamp(days_ago):
+    return (NOW - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Recall(unittest.TestCase):
+    """Stage 2 reads the ledger, so these are the first tests of memory
+    actually influencing a run. The clock is injected; a test that depends
+    on the real one would start failing on its own in a month."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = os.path.join(self.directory.name, "memory.jsonl")
+
+    def write(self, days_ago=1, website="https://notion.so", name="Notion",
+              description="Workspace and notes tool"):
+        return memory.record_run(
+            path=self.path, company_name=name, run_at=stamp(days_ago),
+            identity=identity(website, description=description),
+        )
+
+    def recall(self, key="notion.so", **kwargs):
+        return memory.recall_identity(key, self.path, now=NOW, **kwargs)
+
+    def test_nothing_remembered_is_not_an_error(self):
+        self.assertIsNone(self.recall())
+
+    def test_a_recent_identity_comes_back(self):
+        self.write(days_ago=3)
+        recalled = self.recall()
+        self.assertEqual(recalled["description"], "Workspace and notes tool")
+        self.assertEqual(recalled["website"], "https://notion.so")
+        self.assertAlmostEqual(recalled["age_days"], 3.0, places=3)
+
+    def test_a_stale_identity_is_refused(self):
+        """Older than RECALL_MAX_AGE_DAYS: companies rebrand, move and get
+        acquired, and every later step is told which company this is."""
+        self.write(days_ago=memory.RECALL_MAX_AGE_DAYS + 1)
+        self.assertIsNone(self.recall())
+
+    def test_the_age_limit_is_adjustable(self):
+        self.write(days_ago=60)
+        self.assertIsNone(self.recall())
+        self.assertIsNotNone(self.recall(max_age_days=90))
+
+    def test_the_newest_run_wins(self):
+        self.write(days_ago=20, description="Old description")
+        self.write(days_ago=2, description="Current description")
+        self.assertEqual(self.recall()["description"], "Current description")
+
+    def test_an_unreadable_timestamp_is_not_reused(self):
+        """Unknown age is not the same as fresh."""
+        memory.append_record(
+            memory.build_record(company_name="Notion", run_at="last Tuesday",
+                                identity=identity("https://notion.so")),
+            self.path,
+        )
+        self.assertIsNone(self.recall())
+
+    def test_an_unreadable_timestamp_does_not_hide_a_good_record(self):
+        self.write(days_ago=2)
+        memory.append_record(
+            memory.build_record(company_name="Notion", run_at="whenever",
+                                identity=identity("https://notion.so")),
+            self.path,
+        )
+        self.assertIsNotNone(self.recall())
+
+    def test_a_record_with_no_description_is_skipped(self):
+        self.write(days_ago=5, description="")
+        self.assertIsNone(self.recall())
+
+    def test_another_companys_history_is_not_returned(self):
+        self.write(days_ago=1, website="https://duolingo.com", name="Duolingo")
+        self.assertIsNone(self.recall("notion.so"))
+
+    def test_an_empty_key_recalls_nothing(self):
+        self.write(days_ago=1)
+        self.assertIsNone(self.recall(""))
+
+    def test_the_provenance_of_the_key_is_reported(self):
+        """A caller has to know whether this came from a domain or a guess
+        at a name before deciding how much to trust it."""
+        self.write(days_ago=1)
+        self.assertTrue(self.recall()["key_is_strong"])
+
+        weak = memory.record_run(path=self.path, company_name="Sprout Design",
+                                 run_at=stamp(1), identity=identity(None))
+        self.assertFalse(
+            memory.recall_identity(weak["key"], self.path, now=NOW)["key_is_strong"])
+
+    def test_the_run_date_comes_back_for_the_report(self):
+        """A reused identity has to be labelled with its date, or a stale
+        fact reads as a fresh one."""
+        self.write(days_ago=4)
+        self.assertEqual(self.recall()["run_at"], stamp(4))
+
+
+class Ages(unittest.TestCase):
+    def test_age_is_measured_in_days(self):
+        record = {"run_at": stamp(2.5)}
+        self.assertAlmostEqual(memory.record_age_days(record, NOW), 2.5, places=3)
+
+    def test_an_unparseable_age_is_none(self):
+        for value in ("", None, "2026-10-30", "last week", 17):
+            with self.subTest(value=value):
+                self.assertIsNone(memory.record_age_days({"run_at": value}, NOW))
+
+    def test_a_record_written_now_is_about_zero_days_old(self):
+        record = memory.build_record(company_name="Notion",
+                                     identity=identity("https://notion.so"))
+        self.assertLess(memory.record_age_days(record), 1.0)
 
 
 if __name__ == "__main__":

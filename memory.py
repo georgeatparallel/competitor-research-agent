@@ -41,6 +41,12 @@ SCHEMA_VERSION = 1
 LEDGER_PATH_ENV = "MEMORY_PATH"
 DEFAULT_LEDGER_PATH = "memory.jsonl"
 
+# How old a stored identity may be and still be reused. Deliberately
+# conservative: an identity is cheap to re-establish (one call, two searches)
+# and a wrong one poisons everything downstream, since every later step is
+# told which company it is researching.
+RECALL_MAX_AGE_DAYS = 30
+
 # Hosts that identify a directory or social profile rather than a company.
 # app.py invites a LinkedIn URL explicitly, so applying the domain rule to
 # one would file every company researched that way under "linkedin.com" --
@@ -264,6 +270,71 @@ def record_run(*, path: str | None = None, **fields) -> dict | None:
 
     append_record(record, path)
     return record
+
+
+def _parse_run_at(value) -> datetime | None:
+    """Parse a stored timestamp, or None if it cannot be read.
+
+    Anything unparseable is treated as unknown rather than as "now": a
+    record whose age cannot be established must not be reused.
+    """
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def record_age_days(record: dict, now: datetime | None = None) -> float | None:
+    """How old a record is, in days, or None if its timestamp is unreadable.
+
+    now is injectable so tests do not depend on the real clock.
+    """
+    stored = _parse_run_at(record.get("run_at"))
+    if stored is None:
+        return None
+    return ((now or datetime.now(timezone.utc)) - stored).total_seconds() / 86400
+
+
+def recall_identity(
+    key: str,
+    path: str | None = None,
+    max_age_days: float = RECALL_MAX_AGE_DAYS,
+    now: datetime | None = None,
+) -> dict | None:
+    """The most recent usable identity stored under this key, or None.
+
+    "Usable" means it actually describes a company and is recent enough to
+    still be worth trusting. What a company *is* changes far more slowly
+    than who competes with it, but it does change: companies rebrand, move,
+    get acquired. So this is bounded by age rather than kept forever, and
+    the age is returned so a caller can say out loud how old it is.
+
+    Returning a plain dict, not a CompanyIdentity, keeps this module free
+    of a schemas.py import. The caller converts.
+    """
+    if not key:
+        return None
+
+    for record in read_runs(key, path):
+        identity = record.get("identity") or {}
+        if not identity.get("description"):
+            continue
+
+        age = record_age_days(record, now)
+        if age is None or age > max_age_days:
+            continue
+
+        return {
+            "description": identity["description"],
+            "location": identity.get("location"),
+            "website": identity.get("website"),
+            "run_at": record.get("run_at", ""),
+            "age_days": age,
+            "key_is_strong": bool(record.get("key_is_strong")),
+        }
+
+    return None
 
 
 def read_runs(key: str, path: str | None = None) -> list[dict]:
