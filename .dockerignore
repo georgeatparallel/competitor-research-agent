@@ -13,7 +13,13 @@ venv/
 __pycache__/
 *.pyc
 
-# Local artifacts with no purpose in a running container.
+# Local artifacts with no purpose in a running container. The run ledger is
+# listed for the same reason as .env: it is local state that records which
+# companies were researched, and baking it into an image would ship that to
+# whoever pulls the image. Memory is off unless MEMORY_PATH is set, so a
+# container has none of this unless it is configured to.
+memory.jsonl
+*.jsonl
 report-*.md
 streamlit_out.log
 streamlit_err.log

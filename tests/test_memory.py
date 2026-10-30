@@ -336,6 +336,57 @@ class Ledger(unittest.TestCase):
         self.assertEqual(len(memory.read_runs("notion.so", self.path)), 1)
 
 
+class OptIn(unittest.TestCase):
+    """Memory is off unless MEMORY_PATH names a file.
+
+    This is a privacy property, not a convenience: the hosted demo runs on
+    one shared key for every visitor, so a ledger there would mix strangers'
+    research into one file and, now that reads change behaviour, let one
+    visitor's run inherit another's history.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = os.path.join(self.directory.name, "memory.jsonl")
+
+        previous = os.environ.pop(memory.LEDGER_PATH_ENV, None)
+        if previous is not None:
+            self.addCleanup(os.environ.__setitem__, memory.LEDGER_PATH_ENV,
+                            previous)
+
+    def record(self, **kwargs):
+        return memory.record_run(company_name="Notion",
+                                 identity=identity("https://notion.so"),
+                                 **kwargs)
+
+    def test_no_path_means_memory_is_off(self):
+        self.assertIsNone(memory.ledger_path())
+        self.assertFalse(memory.enabled())
+
+    def test_no_path_means_no_write(self):
+        self.assertIsNone(self.record())
+        self.assertEqual(os.listdir(self.directory.name), [],
+                         "nothing should have been created anywhere")
+
+    def test_no_path_means_no_read(self):
+        self.assertEqual(memory.read_runs("notion.so"), [])
+        self.assertIsNone(memory.recall_identity("notion.so"))
+
+    def test_an_explicit_path_still_works(self):
+        """How the rest of these tests stay independent of the environment."""
+        self.assertIsNotNone(self.record(path=self.path))
+        self.assertEqual(len(memory.read_runs("notion.so", self.path)), 1)
+
+    def test_the_env_var_switches_it_on(self):
+        os.environ[memory.LEDGER_PATH_ENV] = self.path
+        self.addCleanup(os.environ.pop, memory.LEDGER_PATH_ENV, None)
+
+        self.assertTrue(memory.enabled())
+        self.assertIsNotNone(self.record())
+        self.assertEqual(len(memory.read_runs("notion.so")), 1)
+
+
 NOW = datetime(2026, 10, 30, 12, 0, 0, tzinfo=timezone.utc)
 
 

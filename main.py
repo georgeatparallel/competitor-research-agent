@@ -185,7 +185,9 @@ def main() -> None:
             model=MODEL,
             retrieval_provider=getattr(active_provider(), "name", ""),
         )
-        if recorded is None:
+        # record_run returns None both when memory is off and when the
+        # company could not be keyed. Only the second is worth reporting.
+        if recorded is None and memory.enabled():
             print("[memory] Run not recorded: the company could not be keyed.")
     except OSError as exc:
         print(f"[memory] Run not recorded ({exc}).")

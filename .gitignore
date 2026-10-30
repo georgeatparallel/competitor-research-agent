@@ -9,8 +9,10 @@ report-*.md
 
 # The run ledger (memory.py). Records which companies someone researched
 # and when, which is client-identifying for real freelance use, so it stays
-# local. MEMORY_PATH can point it elsewhere.
+# local. MEMORY_PATH names the file and may name any of these, so the
+# pattern is broader than the default.
 memory.jsonl
+*.jsonl
 
 streamlit_out.log
 streamlit_err.log

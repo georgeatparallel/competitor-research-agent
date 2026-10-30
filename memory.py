@@ -20,6 +20,12 @@ weak; a weak key may inform a later run but must never let it skip
 identification. This repo holds two different "Sprout Design" reports,
 which is that risk in the flesh.
 
+OPT-IN. Nothing here reads or writes anything unless MEMORY_PATH names a
+file (or a caller passes an explicit path, which is how the tests avoid
+touching the environment). There is no default location. A public demo
+never sets it, so no visitor inherits a stranger's history and no record of
+who-researched-whom accumulates unasked.
+
 STORAGE. One JSON object per line (JSON Lines), appended. A single JSON
 array would mean read-parse-append-rewrite on every run, so an interrupted
 write could destroy every previous record and two Streamlit sessions could
@@ -39,7 +45,6 @@ from urllib.parse import urlparse
 SCHEMA_VERSION = 1
 
 LEDGER_PATH_ENV = "MEMORY_PATH"
-DEFAULT_LEDGER_PATH = "memory.jsonl"
 
 # How old a stored identity may be and still be reused. Deliberately
 # conservative: an identity is cheap to re-establish (one call, two searches)
@@ -149,15 +154,30 @@ def canonical_key(website: str | None, company_name: str) -> tuple[str, bool]:
 # Records
 # --------------------------------------------------------------------------
 
-def ledger_path() -> str:
-    """Where the ledger lives. MEMORY_PATH overrides the default.
+def ledger_path() -> str | None:
+    """Where the ledger lives, or None when memory is switched off.
+
+    There is no default path on purpose. Memory is opt-in: with MEMORY_PATH
+    unset, nothing here reads or writes anything, and the hosted demo never
+    sets it. That matters more now that reads can change what a run does --
+    a visitor to a public demo should not inherit a stranger's history, and
+    a file of who-researched-whom should not accumulate unasked.
 
     Read at call time, not import time, so a test or a deployment can point
-    it elsewhere. Streamlit Cloud's filesystem is ephemeral -- a file there
-    disappears on restart -- so this indirection is what lets the hosted app
-    move to durable storage as a configuration change rather than a rewrite.
+    it elsewhere. An explicit path argument always wins over this, which is
+    what lets the tests work without touching the environment.
     """
-    return os.environ.get(LEDGER_PATH_ENV) or DEFAULT_LEDGER_PATH
+    return os.environ.get(LEDGER_PATH_ENV) or None
+
+
+def enabled() -> bool:
+    """Whether the environment switches memory on.
+
+    Only for deciding what to say to the user. The functions below are
+    gated on the resolved path, and an explicit path still works when this
+    is False, which is how the tests stay independent of the environment.
+    """
+    return ledger_path() is not None
 
 
 def _utc_now() -> str:
@@ -237,10 +257,12 @@ def build_record(
     }
 
 
-def append_record(record: dict, path: str | None = None) -> str:
-    """Append one record as a single line. Returns the path written to."""
-    path = path or ledger_path()
+def append_record(record: dict, path: str) -> str:
+    """Append one record as a single line. Returns the path written to.
 
+    The path is required: whether memory is on at all is decided once, in
+    record_run, rather than in every function that touches the file.
+    """
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
@@ -257,13 +279,19 @@ def append_record(record: dict, path: str | None = None) -> str:
 def record_run(*, path: str | None = None, **fields) -> dict | None:
     """Build and append a record for a finished run.
 
-    Returns the record, or None when the company could not be identified
-    well enough to key it -- better no entry than one in a bucket shared by
-    every unidentifiable run.
+    Returns None, and writes nothing, when memory is switched off (see
+    ledger_path) or when the company could not be identified well enough to
+    key it -- better no entry than one in a bucket shared by every
+    unidentifiable run. Use enabled() to tell those two cases apart before
+    reporting anything to the user.
 
-    Callers wrap this: at Stage 1 nothing reads the ledger, so failing to
+    Callers wrap this: nothing in a run depends on the ledger, so failing to
     write it must never cost the user their report.
     """
+    path = path or ledger_path()
+    if not path:
+        return None
+
     record = build_record(**fields)
     if not record["key"]:
         return None
@@ -347,12 +375,13 @@ def read_runs(key: str, path: str | None = None) -> list[dict]:
     append-only, so an interrupted write can leave one partial last line,
     and losing all history to one bad line would be the worse failure.
     """
-    if not key:
+    path = path or ledger_path()
+    if not key or not path:
         return []
 
     records = []
     try:
-        with open(path or ledger_path(), encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
