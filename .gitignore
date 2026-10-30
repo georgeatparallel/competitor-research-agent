@@ -7,6 +7,11 @@ __pycache__/
 # Generated reports — one is committed as example-report.md
 report-*.md
 
+# The run ledger (memory.py). Records which companies someone researched
+# and when, which is client-identifying for real freelance use, so it stays
+# local. MEMORY_PATH can point it elsewhere.
+memory.jsonl
+
 streamlit_out.log
 streamlit_err.log
 

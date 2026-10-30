@@ -1,0 +1,299 @@
+"""The run ledger: what was researched, when, and under which key.
+
+Stage 1 of memory is write-only. Every finished run appends one JSON object
+to a ledger file; nothing reads it back yet. That order is deliberate --
+reads change what the agent does and can quietly poison a report, while a
+write nobody consumes cannot break a run that works today. The later stages
+(reuse identity, diff against the last run, learn the reviewer's
+exclusions) all need this history to exist first.
+
+Two decisions shape the rest of this module.
+
+KEYS. Memory only works if a later run can find an earlier one, so every
+run is filed under a key. Names cannot do that job: the model's own output
+drifts between calls -- which is why apply_verifications() in pipeline.py
+pairs competitors by index rather than by name -- and a founder typing
+"Notion", "Notion Labs" or "notion.so" means one company every time. A
+registered domain does not drift, so wherever a domain is known, the domain
+is the key. Where none is, the key falls back to the name and is marked
+weak; a weak key may inform a later run but must never let it skip
+identification. This repo holds two different "Sprout Design" reports,
+which is that risk in the flesh.
+
+STORAGE. One JSON object per line (JSON Lines), appended. A single JSON
+array would mean read-parse-append-rewrite on every run, so an interrupted
+write could destroy every previous record and two Streamlit sessions could
+clobber each other. Appending has neither failure mode, and the file stays
+greppable. No database yet: Stage 1 runs no queries, and the functions here
+are the seam to put one behind later.
+
+Standard library only, so this module can be tested without an API key and
+imported from both the CLI and the Streamlit app.
+"""
+
+import json
+import os
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
+SCHEMA_VERSION = 1
+
+LEDGER_PATH_ENV = "MEMORY_PATH"
+DEFAULT_LEDGER_PATH = "memory.jsonl"
+
+# Hosts that identify a directory or social profile rather than a company.
+# app.py invites a LinkedIn URL explicitly, so applying the domain rule to
+# one would file every company researched that way under "linkedin.com" --
+# one bucket holding everybody's history, and no error to warn us.
+DIRECTORY_HOSTS = {
+    "linkedin.com",
+    "twitter.com",
+    "x.com",
+    "facebook.com",
+    "crunchbase.com",
+}
+
+
+# --------------------------------------------------------------------------
+# Keys
+# --------------------------------------------------------------------------
+
+def _slug(company_name: str) -> str:
+    """Hyphenated lowercase form of a name, or "" if there is nothing to use.
+
+    Same scheme as save_report() in report.py, so a key and a report
+    filename derived from one name agree with each other.
+    """
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in company_name)
+    return "-".join(cleaned.split()).lower()
+
+
+def _host(website: str) -> str:
+    """The host of a URL: lowercased, no scheme, credentials, port or "www.".
+
+    Returns "" when nothing host-shaped can be found.
+    """
+    candidate = website.strip()
+
+    # urlparse() puts a scheme-less "notion.so/about" entirely in .path and
+    # leaves .netloc empty. People type bare domains constantly, so prefix
+    # "//" (a protocol-relative URL) and let urlparse do the rest.
+    if "//" not in candidate:
+        candidate = f"//{candidate}"
+
+    host = urlparse(candidate).netloc.lower()
+    host = host.rpartition("@")[2]   # strip any user:password@
+    host = host.partition(":")[0]    # strip any :port
+    return host.removeprefix("www.")
+
+
+def _looks_like_host(host: str) -> bool:
+    """True only for something plausibly a hostname.
+
+    This guards the strong-key path. Both UIs take the URL as free text, and
+    "hello" or "not a url" typed into that box parses into a non-empty
+    netloc -- which would then be filed as a domain, giving a *strong* key
+    that rests on nothing. A hostname has at least two non-empty
+    dot-separated labels and no whitespace; that is crude, but it is the
+    difference between a trusted key and a typo.
+    """
+    if not host or any(ch.isspace() for ch in host):
+        return False
+    labels = host.split(".")
+    return len(labels) > 1 and all(labels)
+
+
+def _is_directory_host(host: str) -> bool:
+    """True for a directory host or any subdomain of one.
+
+    Exact matching alone would miss "uk.linkedin.com", which is every bit
+    as much a directory page as "linkedin.com" is.
+    """
+    return any(host == known or host.endswith(f".{known}")
+               for known in DIRECTORY_HOSTS)
+
+
+def canonical_key(website: str | None, company_name: str) -> tuple[str, bool]:
+    """Return (key, key_is_strong) for storing this company's run history.
+
+    A strong key is a real domain. A weak key ("name:some-company") is a
+    guess from a name, and callers must not treat it as established
+    identity. An empty key means the company could not be identified at
+    all; a run like that is not filed, rather than filed under a bucket
+    that every unidentifiable run would share.
+    """
+    slug = _slug(company_name)
+    name_key = (f"name:{slug}", False) if slug else ("", False)
+
+    if not website:
+        return name_key
+
+    host = _host(website)
+
+    # A directory host is a page about the company, not the company itself,
+    # so it is no better evidence of identity than the name is. Anything
+    # that does not look like a host at all is weaker still.
+    if not _looks_like_host(host) or _is_directory_host(host):
+        return name_key
+
+    return host, True
+
+
+# --------------------------------------------------------------------------
+# Records
+# --------------------------------------------------------------------------
+
+def ledger_path() -> str:
+    """Where the ledger lives. MEMORY_PATH overrides the default.
+
+    Read at call time, not import time, so a test or a deployment can point
+    it elsewhere. Streamlit Cloud's filesystem is ephemeral -- a file there
+    disappears on restart -- so this indirection is what lets the hosted app
+    move to durable storage as a configuration change rather than a rewrite.
+    """
+    return os.environ.get(LEDGER_PATH_ENV) or DEFAULT_LEDGER_PATH
+
+
+def _utc_now() -> str:
+    """An unambiguous instant, e.g. 2026-10-30T11:42:08Z.
+
+    Reports print local dates for humans; a ledger gets sorted and diffed,
+    so it stores UTC.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _competitor_record(competitor) -> dict:
+    """The fields a later diff needs, read off a Competitor.
+
+    getattr rather than attribute access keeps this module free of a
+    schemas.py import, so tests can pass any simple stand-in object.
+    Positioning is stored because the Stage 3 diff is not only "who
+    appeared and disappeared" but "who repositioned".
+    """
+    return {
+        "name": getattr(competitor, "name", "") or "",
+        "positioning": getattr(competitor, "positioning", "") or "",
+        "pricing": getattr(competitor, "pricing", None),
+        "sources": list(getattr(competitor, "sources", None) or []),
+    }
+
+
+def build_record(
+    *,
+    company_name: str,
+    company_url: str = "",
+    identity=None,
+    competitors=(),
+    excluded_auto=(),
+    removed_by_human=(),
+    problems=(),
+    sources=(),
+    model: str = "",
+    retrieval_provider: str = "",
+    run_at: str | None = None,
+) -> dict:
+    """Assemble one ledger record. Pure: no file access, and no clock if
+    run_at is supplied.
+
+    Keyword-only on purpose -- eleven positional arguments, most of them
+    lists, is a mix-up waiting to happen.
+
+    excluded_auto and removed_by_human stay SEPARATE. Both UIs merge them
+    into one list for the report, distinguished only by the English string
+    "Removed by human reviewer.", and Stage 4 (learning the reviewer's
+    preferences) would then have to parse prose to recover what the human
+    actually chose. The split is captured here, where it still exists.
+    """
+    key, key_is_strong = canonical_key(
+        getattr(identity, "website", None) or company_url, company_name,
+    )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "key": key,
+        "key_is_strong": key_is_strong,
+        "company_name": company_name,
+        "company_url": company_url or "",
+        "run_at": run_at or _utc_now(),
+        "identity": {
+            "description": getattr(identity, "description", "") or "",
+            "location": getattr(identity, "location", None),
+            "website": getattr(identity, "website", None),
+        },
+        "competitors": [_competitor_record(c) for c in competitors],
+        "excluded_auto": [[name, reason] for name, reason in excluded_auto],
+        "excluded_by_human": list(removed_by_human),
+        "problems": list(problems),
+        "model": model,
+        "retrieval_provider": retrieval_provider,
+        "sources_consulted": list(sources),
+    }
+
+
+def append_record(record: dict, path: str | None = None) -> str:
+    """Append one record as a single line. Returns the path written to."""
+    path = path or ledger_path()
+
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    # sort_keys so two records diff cleanly; ensure_ascii=False so a company
+    # name with an accent stays readable in the file.
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
+
+    return path
+
+
+def record_run(*, path: str | None = None, **fields) -> dict | None:
+    """Build and append a record for a finished run.
+
+    Returns the record, or None when the company could not be identified
+    well enough to key it -- better no entry than one in a bucket shared by
+    every unidentifiable run.
+
+    Callers wrap this: at Stage 1 nothing reads the ledger, so failing to
+    write it must never cost the user their report.
+    """
+    record = build_record(**fields)
+    if not record["key"]:
+        return None
+
+    append_record(record, path)
+    return record
+
+
+def read_runs(key: str, path: str | None = None) -> list[dict]:
+    """Past records for one key, newest first.
+
+    Nothing calls this at Stage 1. It exists now because it pins down the
+    read shape while the write shape is fresh, and because Stage 2 needs it.
+
+    A malformed line is skipped rather than raised: the ledger is
+    append-only, so an interrupted write can leave one partial last line,
+    and losing all history to one bad line would be the worse failure.
+    """
+    if not key:
+        return []
+
+    records = []
+    try:
+        with open(path or ledger_path(), encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict) and record.get("key") == key:
+                    records.append(record)
+    except FileNotFoundError:
+        return []
+
+    records.sort(key=lambda record: record.get("run_at", ""), reverse=True)
+    return records

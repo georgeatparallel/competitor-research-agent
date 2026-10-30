@@ -29,9 +29,11 @@ failures.bridge_secrets(st.secrets, os.environ)
 from google.genai import errors
 
 import evaluate
+import memory
 import pipeline
 import report as report_module
 import tools
+from config import MODEL
 
 st.set_page_config(page_title="Competitor Research Agent", page_icon="🔍")
 st.title("Competitor Research Agent")
@@ -43,7 +45,7 @@ st.caption(
 
 # --- one-time state so a rerun (checkbox click, etc.) doesn't lose results ---
 for key in ("stage", "identity", "research", "verified", "excluded", "problems",
-            "company_name", "company_url", "report_text"):
+            "company_name", "company_url", "report_text", "run_logged"):
     st.session_state.setdefault(key, None)
 if st.session_state["stage"] is None:
     st.session_state["stage"] = "input"
@@ -51,7 +53,8 @@ if st.session_state["stage"] is None:
 
 def reset() -> None:
     """Clear everything so a new company starts from a clean slate."""
-    for key in ("identity", "research", "verified", "excluded", "problems", "report_text"):
+    for key in ("identity", "research", "verified", "excluded", "problems",
+                "report_text", "run_logged"):
         st.session_state[key] = None
     st.session_state["stage"] = "input"
 
@@ -242,6 +245,31 @@ elif st.session_state["stage"] == "review":
                     excluded=final_excluded,
                     sources=tools.sources_consulted(),
                 )
+
+                # One ledger entry per run. Streamlit leaves this review UI
+                # on screen after the report appears, so the button can be
+                # pressed again -- without the flag that would append a
+                # second record for the same research. Best-effort, like the
+                # CLI: the report is already built, and nothing reads the
+                # ledger yet, so a write failure is logged and swallowed.
+                if not st.session_state["run_logged"]:
+                    try:
+                        memory.record_run(
+                            company_name=st.session_state["company_name"],
+                            company_url=st.session_state["company_url"],
+                            identity=identity,
+                            competitors=final,
+                            excluded_auto=excluded,
+                            removed_by_human=removed_now,
+                            problems=problems,
+                            sources=tools.sources_consulted(),
+                            model=MODEL,
+                            retrieval_provider=getattr(
+                                tools.active_provider(), "name", ""),
+                        )
+                        st.session_state["run_logged"] = True
+                    except OSError as exc:
+                        print(f"[memory] run not recorded ({exc})", flush=True)
 
 # --- Step 4: show and download the report ---
 if st.session_state["report_text"]:

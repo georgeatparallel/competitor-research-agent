@@ -289,9 +289,27 @@ eval_cases.py  Regression cases, each one a bug that actually happened
 run_eval.py    Runs the cases and reports gates, observations, and metrics
 report.py      Markdown generation, with corroboration labels inline
 config.py      Clients, model choice, retry policy
+memory.py      The run ledger: a stable key per company, and one appended
+               JSON line per finished run
 ```
 
 Prompts live in their own file deliberately: in an LLM application, most iteration happens in prompt text rather than code, so it should be easy to read and compare.
+
+---
+
+## The run ledger
+
+Every finished run appends one JSON object to `memory.jsonl` (set `MEMORY_PATH` to put it elsewhere): the company, a canonical key, the final competitor set, what was excluded and by whom, and which model and retrieval backend produced it. The file is gitignored, because it records which companies someone researched.
+
+Three things about it are deliberate.
+
+**It is write-only for now.** Nothing reads the ledger back, so a run behaves exactly as it did before. Reads are what change the agent's behaviour and can quietly launder a stale claim into a fresh-looking fact, so they come later, on a history that already exists.
+
+**Runs are keyed by domain, not by name.** Model-generated names drift between calls, and "Notion", "Notion Labs" and `notion.so` are one company. The key is the registered domain wherever one is known; where none is, it falls back to the name and is flagged weak, and a weak key is not allowed to stand in for identification. A directory URL is refused outright: `app.py` invites a LinkedIn URL, and keying on `linkedin.com` would file every company researched that way into one shared bucket.
+
+**Automatic and human exclusions are stored separately.** The report does not care who rejected a candidate, but a reviewer's choice is evidence of what this user wants and a verification rejection is not — so the two are never merged in storage.
+
+Writes are best-effort: a ledger failure is logged and the report still reaches the user.
 
 ---
 

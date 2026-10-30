@@ -14,10 +14,12 @@ The flow:
 import sys
 
 import evaluate
+import memory
 import pipeline
 import report as report_module
+from config import MODEL
 from schemas import Competitor
-from tools import sources_consulted
+from tools import active_provider, sources_consulted
 
 
 def clean_input(prompt: str) -> str:
@@ -33,8 +35,15 @@ def review_competitors(
     competitors: list[Competitor],
     excluded: list[tuple[str, str]],
     problems: list[str],
-) -> list[Competitor]:
-    """Show what the system decided and let the human overrule it."""
+) -> tuple[list[Competitor], list[str]]:
+    """Show what the system decided and let the human overrule it.
+
+    Returns (kept, names_the_human_removed). The removals are also appended
+    to `excluded` for the report, which does not care who rejected what;
+    they are returned separately as well because the run ledger does -- a
+    reviewer's choice is evidence of what this user wants, and verification
+    rejecting a candidate is not.
+    """
     print("\n" + "=" * 64)
     print("REVIEW")
     print("=" * 64)
@@ -50,7 +59,7 @@ def review_competitors(
             print(f"  - {name}: {reason}")
 
     if not competitors:
-        return []
+        return [], []
 
     print(f"\n{len(competitors)} competitor(s) passed verification:\n")
     for i, competitor in enumerate(competitors):
@@ -68,14 +77,16 @@ def review_competitors(
         except ValueError:
             print("Could not read that input — keeping all competitors.")
 
-    kept = []
+    kept: list[Competitor] = []
+    removed: list[str] = []
     for i, competitor in enumerate(competitors):
         if i in to_remove:
             excluded.append((competitor.name, "Removed by human reviewer."))
+            removed.append(competitor.name)
         else:
             kept.append(competitor)
 
-    return kept
+    return kept, removed
 
 
 def main() -> None:
@@ -125,8 +136,11 @@ def main() -> None:
     problems += evaluate.check_source_corroboration(verified)
     problems += evaluate.check_precise_claims_are_corroborated(verified)
 
-    # Step 3 — human review.
-    final = review_competitors(verified, excluded, problems)
+    # Step 3 — human review. Snapshot the automatic exclusions first: review
+    # appends the reviewer's own removals to the same list, and the ledger
+    # needs to tell the two apart.
+    excluded_auto = list(excluded)
+    final, removed_by_human = review_competitors(verified, excluded, problems)
 
     if not final:
         sys.exit("\nNo competitors remain, so there is no report to write.")
@@ -142,6 +156,27 @@ def main() -> None:
         sources=sources_consulted(),
     )
     filename = report_module.save_report(company_name, content)
+
+    # Step 5 — file this run in the ledger. Best-effort by design: nothing
+    # reads it yet, so a failure to record must not cost the user the report
+    # they just waited for.
+    try:
+        recorded = memory.record_run(
+            company_name=company_name,
+            company_url=company_url,
+            identity=identity,
+            competitors=final,
+            excluded_auto=excluded_auto,
+            removed_by_human=removed_by_human,
+            problems=problems,
+            sources=sources_consulted(),
+            model=MODEL,
+            retrieval_provider=getattr(active_provider(), "name", ""),
+        )
+        if recorded is None:
+            print("[memory] Run not recorded: the company could not be keyed.")
+    except OSError as exc:
+        print(f"[memory] Run not recorded ({exc}).")
 
     print(f"\nReport written to {filename}")
     print(f"{len(final)} competitor(s) included, {len(excluded)} excluded.")
