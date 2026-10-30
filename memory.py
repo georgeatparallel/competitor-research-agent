@@ -52,16 +52,35 @@ LEDGER_PATH_ENV = "MEMORY_PATH"
 # told which company it is researching.
 RECALL_MAX_AGE_DAYS = 30
 
-# Hosts that identify a directory or social profile rather than a company.
-# app.py invites a LinkedIn URL explicitly, so applying the domain rule to
-# one would file every company researched that way under "linkedin.com" --
-# one bucket holding everybody's history, and no error to warn us.
+# Hosts that are a directory, a profile or a publishing platform rather than
+# a company. A strong key has to identify exactly one company, and these
+# identify none: app.py invites a LinkedIn URL explicitly, so applying the
+# domain rule to one would file every company researched that way under
+# "linkedin.com", a single bucket holding everybody's history with no error
+# to warn us. The same goes for a GitHub organisation page or a Medium
+# publication, which are addresses on someone else's platform.
+#
+# Accepted consequence: a company that IS one of these, such as GitHub
+# itself, gets a weak name-based key and so is never recalled from a URL.
+# Rare, and the failure is a missed shortcut rather than a wrong answer.
+#
+# Not handled here, deliberately: hosts shared at the SUBDOMAIN level, such
+# as acme.notion.site or acme.github.io. Those are already distinct keys
+# because the full host is kept, so they identify one company each. Noted
+# for Stage 3, which is where subdomain keying is worth revisiting.
 DIRECTORY_HOSTS = {
+    "crunchbase.com",
+    "facebook.com",
+    "github.com",
+    "gitlab.com",
+    "huggingface.co",
+    "instagram.com",
     "linkedin.com",
+    "medium.com",
+    "producthunt.com",
     "twitter.com",
     "x.com",
-    "facebook.com",
-    "crunchbase.com",
+    "youtube.com",
 }
 
 

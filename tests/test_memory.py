@@ -150,11 +150,54 @@ class DirectoryHosts(unittest.TestCase):
                                  ("name:notion", False))
 
     def test_a_company_domain_that_merely_resembles_one_is_kept(self):
-        """Suffix matching must not swallow a real company's domain."""
-        for website, expected in (("https://mylinkedin.com", "mylinkedin.com"),
-                                  ("https://linkedin.com.au", "linkedin.com.au")):
+        """Suffix matching must not swallow a real company's domain.
+
+        box.com and mymedium.com are the shapes that a sloppier rule would
+        catch: a substring test would see "box" inside "facebook.com" and
+        "medium.com" inside "mymedium.com". Only a whole-host or
+        whole-subdomain match is a directory.
+        """
+        look_alikes = (
+            ("https://box.com", "box.com"),
+            ("https://mymedium.com", "mymedium.com"),
+            ("https://mylinkedin.com", "mylinkedin.com"),
+            ("https://linkedin.com.au", "linkedin.com.au"),
+            ("https://githubbed.com", "githubbed.com"),
+            ("https://notx.com", "notx.com"),
+        )
+        for website, expected in look_alikes:
             with self.subTest(website=website):
                 self.assertEqual(memory.canonical_key(website, "Thing"),
+                                 (expected, True))
+
+    def test_the_platform_hosts_are_all_refused(self):
+        """Named explicitly as well as iterated, so removing one from the set
+        fails a test that says what it was for."""
+        for host in ("github.com", "gitlab.com", "huggingface.co",
+                     "crunchbase.com", "producthunt.com", "x.com",
+                     "twitter.com", "facebook.com", "instagram.com",
+                     "youtube.com", "medium.com", "linkedin.com"):
+            with self.subTest(host=host):
+                self.assertIn(host, memory.DIRECTORY_HOSTS)
+                key, strong = memory.canonical_key(f"https://{host}/acme",
+                                                   "Acme")
+                self.assertEqual((key, strong), ("name:acme", False))
+
+    def test_a_subdomain_of_a_platform_is_refused(self):
+        for website in ("https://gist.github.com/acme",
+                        "https://uk.linkedin.com/company/acme",
+                        "https://blog.medium.com/acme"):
+            with self.subTest(website=website):
+                self.assertEqual(memory.canonical_key(website, "Acme"),
+                                 ("name:acme", False))
+
+    def test_a_subdomain_that_is_the_company_keeps_its_own_key(self):
+        """acme.notion.site and acme.github.io identify one company each,
+        because the whole host is the key. Noted for Stage 3, unchanged."""
+        for website, expected in (("https://acme.notion.site", "acme.notion.site"),
+                                  ("https://acme.github.io", "acme.github.io")):
+            with self.subTest(website=website):
+                self.assertEqual(memory.canonical_key(website, "Acme"),
                                  (expected, True))
 
 
