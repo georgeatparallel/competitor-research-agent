@@ -18,6 +18,7 @@ local reproduction to identify. Three things are protected here:
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 os.environ.setdefault("TAVILY_API_KEY", "test-tavily-key")
@@ -190,6 +191,42 @@ class LogLines(unittest.TestCase):
         message = failures.unexpected_error_message()
         self.assertIn("logged", message)
         self.assertNotIn("Traceback", message)
+
+
+class CliFailures(unittest.TestCase):
+    """The CLI must report a provider failure as a sentence too.
+
+    Found by running main.py for real against an exhausted daily quota: it
+    printed the retry detail four times and then a traceback, while app.py
+    had answered the same error with one plain sentence ever since the 503
+    work. The messages are shared rather than reworded, so the two surfaces
+    cannot drift apart again.
+    """
+
+    def exit_message(self, exception):
+        import main
+
+        with patch.object(main, "main", side_effect=exception):
+            with self.assertRaises(SystemExit) as caught:
+                main.run()
+        return str(caught.exception)
+
+    def test_an_exhausted_quota_is_a_sentence(self):
+        message = self.exit_message(api_error(429))
+        self.assertIn("daily usage limit", message)
+        self.assertNotIn("Traceback", message)
+        self.assertNotIn("RESOURCE_EXHAUSTED", message)
+
+    def test_an_upstream_failure_still_names_the_code(self):
+        self.assertIn("503", self.exit_message(api_error(503)))
+
+    def test_the_same_message_as_the_web_ui(self):
+        """One wording for both surfaces, from failures.py."""
+        self.assertEqual(self.exit_message(api_error(429)),
+                         failures.api_error_message(429))
+
+    def test_ctrl_c_is_not_a_crash(self):
+        self.assertIn("Stopped", self.exit_message(KeyboardInterrupt()))
 
 
 class SecretBridge(unittest.TestCase):

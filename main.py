@@ -13,7 +13,10 @@ The flow:
 
 import sys
 
+from google.genai import errors
+
 import evaluate
+import failures
 import memory
 import pipeline
 import recall
@@ -191,5 +194,25 @@ def main() -> None:
     print(f"{len(final)} competitor(s) included, {len(excluded)} excluded.")
 
 
+def run() -> None:
+    """Entry point: report a provider failure as a sentence, not a traceback.
+
+    app.py has handled this since a transient 503 reached a user as a generic
+    error, but the CLI never did. Found by running it for real: an exhausted
+    daily quota printed four screens of retry detail and then a traceback,
+    while the web UI had a plain sentence for the same error all along.
+
+    Unexpected exceptions are deliberately left to raise. The CLI is the
+    development surface, and there a traceback is the useful answer.
+    """
+    try:
+        main()
+    except errors.APIError as exc:
+        print(failures.api_error_log_line(exc), flush=True)
+        sys.exit(failures.api_error_message(exc.code))
+    except KeyboardInterrupt:
+        sys.exit("\nStopped.")
+
+
 if __name__ == "__main__":
-    main()
+    run()
