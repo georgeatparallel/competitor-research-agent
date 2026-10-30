@@ -299,31 +299,47 @@ Prompts live in their own file deliberately: in an LLM application, most iterati
 
 ---
 
-## The run ledger
+## Memory
 
-Every finished run appends one JSON object to `memory.jsonl` (set `MEMORY_PATH` to put it elsewhere): the company, a canonical key, the final competitor set, what was excluded and by whom, and which model and retrieval backend produced it. The file is gitignored, because it records which companies someone researched.
+Memory is **off unless you switch it on**, and it is off in the hosted demo. Set `MEMORY_PATH` to a file and the tool starts keeping a ledger of finished runs; leave it unset and nothing is read, nothing is written, and no file appears.
 
-Three things about it are deliberate.
+```bash
+MEMORY_PATH=memory.jsonl python main.py
+```
 
-**It is write-only for now.** Nothing reads the ledger back, so a run behaves exactly as it did before. Reads are what change the agent's behaviour and can quietly launder a stale claim into a fresh-looking fact, so they come later, on a history that already exists.
+**What is stored.** One JSON object per finished run, appended as a single line: the company name, the URL that was typed or accepted, the canonical key, the resolved identity, the competitors that made the report with their positioning and sources, what was excluded automatically and what the reviewer removed, the automatic check results, and which model and retrieval backend produced it.
 
-**Runs are keyed by domain, not by name.** Model-generated names drift between calls, and "Notion", "Notion Labs" and `notion.so` are one company. The key is the registered domain wherever one is known; where none is, it falls back to the name and is flagged weak, and a weak key is not allowed to stand in for identification. A directory URL is refused outright: `app.py` invites a LinkedIn URL, and keying on `linkedin.com` would file every company researched that way into one shared bucket.
+**Where.** Wherever `MEMORY_PATH` points. There is no default location, so an unconfigured checkout has no memory at all. The pattern is in `.gitignore` and in `.dockerignore`, because the file records which companies someone researched and Docker does not read `.gitignore`.
 
-**Automatic and human exclusions are stored separately.** The report does not care who rejected a candidate, but a reviewer's choice is evidence of what this user wants and a verification rejection is not — so the two are never merged in storage.
+**How to delete it.** Delete the file. There is no index, no database and no cache anywhere else, so removing it forgets everything. Removing a single run means deleting its line.
 
-Writes are best-effort: a ledger failure is logged and the report still reaches the user.
+**Why it is off in hosted demos.** The deployed app serves every visitor from one shared API key. A ledger there would mix strangers' research into one file, and now that reads can change what a run does, one visitor could inherit another's identity lookup. Off by default is the only answer that does not require trusting the host.
 
-### Reusing an identity
+### What memory changes
 
-Establishing which company is meant costs an LLM call and up to two searches, and for a company researched before under its own domain that answer already exists. `recall.py` reuses it, under two conditions.
+Two things, both of which the user can see and overrule.
 
-**Only a strong key.** A weak key gets no memory at all, not even as a hint: a name can mean a different company next month, and offering the model a past run's guess would bias it toward repeating a misidentification on exactly the ambiguous names the pipeline is supposed to stop on.
+**It offers a website you used before.** Runs are filed under a domain, but someone typing a name alone can only ask about a name, so a name-only run can never find its own history by key. Instead the ledger is matched by normalised company name, and any websites that name resolved to before are offered with their dates. Nothing is chosen automatically, even when there is only one match: two unrelated companies can share a name, and which one is meant is not a judgement to make on someone's behalf. Accept one and the run continues exactly as if that URL had been typed.
 
-**Only recently.** Older than `RECALL_MAX_AGE_DAYS` (30) and the identity is re-established, because companies rebrand, move and get acquired, and every later step is told which company it is researching. A record whose timestamp cannot be parsed counts as unknown rather than current, so it is refused too.
+**It reuses a recent identity.** Establishing which company is meant costs an LLM call and up to two searches, and for a company already researched under its own domain that answer exists. It is reused only when the key is strong, meaning it came from a domain, and only when the record is newer than `RECALL_MAX_AGE_DAYS` (30). An unparseable timestamp counts as unknown age and is refused. Pass `--fresh-identity` in the CLI, or tick **Re-establish identity** in the web UI, to force a live lookup regardless: no age limit knows that a company rebranded last week, and the person asking usually does.
 
-A reused identity is labelled with the date it was established, in the terminal, in the web UI and in the report. A cached claim otherwise reads exactly like one checked today.
+Anything taken from an earlier run is disclosed with that run's date, in the terminal, in the web UI and as a line in the report. A cached claim otherwise reads exactly like one checked today, which is the opposite of what these reports are for.
 
-`recall.py` sits above `pipeline.py` rather than inside it, which is what keeps the evaluation harness honest: `run_eval.py` calls `pipeline.identify_company` directly, so no stored history can influence a benchmark. That property comes from the layering rather than from a flag someone has to remember to set.
+### What memory does not do
+
+**It never reaches the model.** No prompt changes, ever. A remembered website is shown to the user, not fed to the LLM as a candidate: the model tends to agree with what it is shown, and that would bias it toward repeating a past misidentification on exactly the ambiguous names the pipeline is designed to stop on. Memory either replaces the identify call with a stored, dated, disclosed identity, or it stays out of the way.
+
+**It never changes a benchmark.** `recall.py` sits above `pipeline.py` rather than inside it, and `run_eval.py` calls `pipeline.identify_company` directly, so stored history cannot influence an eval. A test parses the imports of `pipeline.py`, `prompts.py`, `evaluate.py` and `run_eval.py` and fails if any of them ever imports `memory` or `recall`. The property is structural rather than a flag someone has to remember to set.
+
+**It never decides who a company is.** A key derived from a name is flagged weak and is never used to skip identification. A host that belongs to a platform rather than a company (`linkedin.com`, `github.com`, `medium.com` and the rest of `DIRECTORY_HOSTS`) is refused as a key outright, since keying on one would file unrelated companies into a single bucket.
+
+### How runs are keyed
+
+The registered domain, lowercased, with `www.` removed: `https://www.Notion.so/product` and a bare `notion.so` are one key. Names cannot do this job, because model output drifts between calls and "Notion", "Notion Labs" and `notion.so` are one company. Where no domain is available the key falls back to `name:<slug>` and is marked weak; where the company cannot be identified at all the run is not filed, rather than filed under a bucket every unidentifiable run would share.
+
+Automatic exclusions and the reviewer's own removals are stored separately. The report does not care who rejected a candidate, but a reviewer's choice is evidence of what this user wants and a verification rejection is not, so the two are never merged in storage.
+
+Writes and reads are both best-effort: a ledger failure is logged and the run continues. Nothing in a report depends on memory being available.
 
 ---
 
