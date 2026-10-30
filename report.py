@@ -69,6 +69,7 @@ def build_report(
     excluded: list[tuple[str, str]],
     sources: list[str],
     identity_recalled: dict | None = None,
+    url_remembered: dict | None = None,
 ) -> str:
     lines: list[str] = [
         f"# Competitor Research: {company_name}",
@@ -86,16 +87,24 @@ def build_report(
     if company_url:
         lines.append(f"- **Identity anchored to:** {company_url}")
 
-    # A reused identity has to carry its date. Without this line a fact
-    # established weeks ago reads exactly like one checked today, which is
-    # the opposite of what the rest of this report is for.
+    # Anything taken from an earlier run has to carry that run's date.
+    # Without this line a fact established weeks ago reads exactly like one
+    # checked today, which is the opposite of what this report is for. One
+    # line covers both kinds of reuse, since they often happen together: a
+    # remembered website leads to a strong key, which is what makes the
+    # identity reusable in the first place.
+    memory_notes = []
+    if url_remembered:
+        memory_notes.append(
+            f"website remembered from the run on "
+            f"{(url_remembered.get('run_at') or '')[:10]} and confirmed by you")
     if identity_recalled:
-        established = (identity_recalled.get("run_at") or "")[:10]
-        lines.append(
-            f"- **Identity:** reused from an earlier run"
-            + (f" on {established}" if established else "")
-            + ", not re-established for this report"
-        )
+        memory_notes.append(
+            f"identity reused from the run on "
+            f"{(identity_recalled.get('run_at') or '')[:10]}, not "
+            f"re-established for this report")
+    if memory_notes:
+        lines.append(f"- **From memory:** {'; '.join(memory_notes)}")
     lines += ["", f"## Competitors ({len(competitors)})", ""]
 
     for competitor in competitors:

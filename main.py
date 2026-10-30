@@ -15,6 +15,11 @@ import sys
 
 from google.genai import errors
 
+# Forces a live identify even when a recent one is stored. A reused identity
+# is a judgement the user must be able to overrule: they may know the company
+# rebranded, moved or was acquired, which no age limit can know for them.
+FRESH_IDENTITY_FLAG = "--fresh-identity"
+
 import evaluate
 import failures
 import memory
@@ -33,6 +38,44 @@ def clean_input(prompt: str) -> str:
     queries and the report filename.
     """
     return input(prompt).replace("﻿", "").strip()
+
+
+def offer_remembered_urls(company_name: str) -> tuple[str, dict | None]:
+    """Offer websites this name has resolved to before. Returns (url, pick).
+
+    Memory suggests; the user decides. Nothing is chosen automatically, even
+    when there is only one candidate: two unrelated companies can share a
+    name, and resolving that is the user's call. Ages are shown rather than
+    used as a filter, for the same reason.
+    """
+    candidates = recall.find_candidates(company_name)
+    if not candidates:
+        return "", None
+
+    print(f'\nYou have researched "{company_name}" before:')
+    for number, candidate in enumerate(candidates, start=1):
+        print(f"  [{number}] {candidate['website']}"
+              f"   (last run {candidate['run_at'][:10]}, "
+              f"{candidate['age_days']:.0f} days ago)")
+    print("  [0] none of these")
+
+    answer = clean_input("Use one of these? Enter a number, or press Enter to skip: ")
+    if not answer:
+        return "", None
+
+    try:
+        choice = int(answer)
+    except ValueError:
+        print("Could not read that input — continuing without a URL.")
+        return "", None
+
+    if not 1 <= choice <= len(candidates):
+        return "", None
+
+    chosen = candidates[choice - 1]
+    print(f"Using {chosen['website']}, remembered from the run on "
+          f"{chosen['run_at'][:10]}.")
+    return chosen["website"], chosen
 
 
 def review_competitors(
@@ -94,15 +137,27 @@ def review_competitors(
 
 
 def main() -> None:
+    allow_recall = FRESH_IDENTITY_FLAG not in sys.argv
+
     company_name = clean_input("Enter a company or startup name: ")
     company_url = clean_input(
         "Company website or LinkedIn URL (optional, press Enter to skip): "
     )
 
+    # A name on its own cannot find its own history, because runs are filed
+    # under a domain. So memory offers what this name resolved to before and
+    # the user confirms; from there the run continues exactly as if they had
+    # typed that URL, including reusing a fresh identity for it.
+    url_remembered = None
+    if not company_url:
+        company_url, url_remembered = offer_remembered_urls(company_name)
+
     # Step 0 — which company do we actually mean? A company researched
     # before under its own domain can reuse that answer; see recall.py for
     # when it may not.
-    identity, identity_recalled = recall.establish_identity(company_name, company_url)
+    identity, identity_recalled = recall.establish_identity(
+        company_name, company_url, allow_recall=allow_recall,
+    )
 
     if identity is None:
         sys.exit("Could not confirm the company's identity within the allowed tool calls.")
@@ -118,7 +173,8 @@ def main() -> None:
     if identity_recalled:
         print(f"\nReusing the identity established on "
               f"{identity_recalled['run_at'][:10]} "
-              f"({identity_recalled['age_days']:.0f} days ago).")
+              f"({identity_recalled['age_days']:.0f} days ago). "
+              f"Run with {FRESH_IDENTITY_FLAG} to establish it fresh instead.")
 
     print(f"\nConfirmed: {identity.description}")
     print(f"Location: {identity.location or 'not established'}"
@@ -166,6 +222,7 @@ def main() -> None:
         excluded=excluded,
         sources=sources_consulted(),
         identity_recalled=identity_recalled,
+        url_remembered=url_remembered,
     )
     filename = report_module.save_report(company_name, content)
 
@@ -184,6 +241,10 @@ def main() -> None:
             sources=sources_consulted(),
             model=MODEL,
             retrieval_provider=getattr(active_provider(), "name", ""),
+            url_source=("remembered" if url_remembered
+                        else "typed" if company_url else "none"),
+            url_remembered_from=(url_remembered["run_at"] if url_remembered
+                                 else ""),
         )
         # record_run returns None both when memory is off and when the
         # company could not be keyed. Only the second is worth reporting.

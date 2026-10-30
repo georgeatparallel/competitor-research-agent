@@ -42,7 +42,10 @@ import os
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-SCHEMA_VERSION = 1
+# 2 added url_source and url_remembered_from. Older lines simply lack those
+# fields, and every read here uses .get, so a version 1 ledger stays
+# readable rather than needing a migration.
+SCHEMA_VERSION = 2
 
 LEDGER_PATH_ENV = "MEMORY_PATH"
 
@@ -236,6 +239,8 @@ def build_record(
     sources=(),
     model: str = "",
     retrieval_provider: str = "",
+    url_source: str = "",
+    url_remembered_from: str = "",
     run_at: str | None = None,
 ) -> dict:
     """Assemble one ledger record. Pure: no file access, and no clock if
@@ -272,6 +277,13 @@ def build_record(
         "problems": list(problems),
         "model": model,
         "retrieval_provider": retrieval_provider,
+        # How the URL that anchored this run was obtained: "typed", or
+        # "remembered" when the user accepted one this ledger offered, with
+        # the run it came from. Worth storing because a remembered URL makes
+        # the run partly a consequence of an earlier one, and a chain of
+        # those should be visible rather than inferred.
+        "url_source": url_source,
+        "url_remembered_from": url_remembered_from,
         "sources_consulted": list(sources),
     }
 
@@ -384,18 +396,19 @@ def recall_identity(
     return None
 
 
-def read_runs(key: str, path: str | None = None) -> list[dict]:
-    """Past records for one key, newest first.
-
-    Nothing calls this at Stage 1. It exists now because it pins down the
-    read shape while the write shape is fresh, and because Stage 2 needs it.
+def read_all_runs(path: str | None = None) -> list[dict]:
+    """Every record in the ledger, newest first. Empty when memory is off.
 
     A malformed line is skipped rather than raised: the ledger is
     append-only, so an interrupted write can leave one partial last line,
     and losing all history to one bad line would be the worse failure.
+
+    The whole file is read because the useful questions are not all
+    key-shaped. Matching a company by NAME needs every record, since a name
+    cannot be turned into the domain key a run was filed under.
     """
     path = path or ledger_path()
-    if not key or not path:
+    if not path:
         return []
 
     records = []
@@ -409,10 +422,17 @@ def read_runs(key: str, path: str | None = None) -> list[dict]:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(record, dict) and record.get("key") == key:
+                if isinstance(record, dict):
                     records.append(record)
     except FileNotFoundError:
         return []
 
     records.sort(key=lambda record: record.get("run_at", ""), reverse=True)
     return records
+
+
+def read_runs(key: str, path: str | None = None) -> list[dict]:
+    """Past records for one key, newest first."""
+    if not key:
+        return []
+    return [record for record in read_all_runs(path) if record.get("key") == key]

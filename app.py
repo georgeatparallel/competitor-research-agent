@@ -47,8 +47,11 @@ st.caption(
 # --- one-time state so a rerun (checkbox click, etc.) doesn't lose results ---
 for key in ("stage", "identity", "research", "verified", "excluded", "problems",
             "company_name", "company_url", "report_text", "run_logged",
-            "identity_recalled"):
+            "identity_recalled", "candidates", "url_remembered"):
     st.session_state.setdefault(key, None)
+
+# Not in the loop above: None is falsy, and this one defaults to on.
+st.session_state.setdefault("allow_recall", True)
 if st.session_state["stage"] is None:
     st.session_state["stage"] = "input"
 
@@ -56,18 +59,138 @@ if st.session_state["stage"] is None:
 def reset() -> None:
     """Clear everything so a new company starts from a clean slate."""
     for key in ("identity", "research", "verified", "excluded", "problems",
-                "report_text", "run_logged", "identity_recalled"):
+                "report_text", "run_logged", "identity_recalled",
+                "candidates", "url_remembered"):
         st.session_state[key] = None
+    st.session_state["allow_recall"] = True
     st.session_state["stage"] = "input"
 
 
 # --- Step 0/1/2: identify, research, verify -- runs once per company ---
+
+def research_company() -> None:
+    """Identify, research, verify. Reads and writes st.session_state only.
+
+    A function rather than inline script because there are now two ways in:
+    submitting the form, and accepting a website this ledger remembered.
+    Streamlit reruns this file top to bottom on every interaction, so both
+    entry points have to sit above the review section further down, which
+    renders whatever this leaves behind.
+
+    This app runs on ONE shared API key for every visitor -- there is no
+    per-user quota. Free-tier limits are real and we hit them ourselves
+    during development, so a visitor arriving after the key is already near
+    its daily cap is an expected case, not a rare edge case. It is caught
+    here and shown as a plain message instead of Streamlit's default crash
+    screen; the retries in config.py, tools.py and pipeline.py have already
+    absorbed anything short-lived, so an error reaching this point means
+    they were exhausted and retrying again immediately will not help.
+    """
+    try:
+        with st.status("Identifying the company...", expanded=True) as status:
+            tools.set_progress_hook(status.write)
+            identity, identity_recalled = recall.establish_identity(
+                st.session_state["company_name"],
+                st.session_state["company_url"],
+                allow_recall=st.session_state["allow_recall"],
+            )
+            st.session_state["identity_recalled"] = identity_recalled
+            if identity_recalled:
+                status.write(
+                    f"Reusing the identity established on "
+                    f"{identity_recalled['run_at'][:10]} "
+                    f"({identity_recalled['age_days']:.0f} days ago). Tick "
+                    f"\"Re-establish identity\" above to check it live instead."
+                )
+
+            if identity is None:
+                status.update(label="Could not confirm identity", state="error")
+                st.session_state["stage"] = "identity_failed"
+            elif not identity.confident_match:
+                status.update(label="Identity is ambiguous", state="error")
+                st.session_state["identity"] = identity
+                st.session_state["stage"] = "identity_ambiguous"
+            else:
+                status.update(label=f"Confirmed: {identity.description[:80]}...",
+                              state="complete")
+                st.session_state["identity"] = identity
+                st.session_state["stage"] = "researching"
+
+        if st.session_state["stage"] == "researching":
+            with st.status("Researching competitors...", expanded=True) as status:
+                tools.set_progress_hook(status.write)
+                research = pipeline.research_competitors(
+                    st.session_state["company_name"], identity
+                )
+
+                if research is None:
+                    status.update(label="Ran out of tool calls before finishing",
+                                  state="error")
+                    st.session_state["stage"] = "research_failed"
+                else:
+                    status.write("Independently verifying each competitor...")
+                    verifications = pipeline.verify_competitors(
+                        st.session_state["company_name"], identity,
+                        research.competitors
+                    )
+                    verified, excluded = pipeline.apply_verifications(
+                        research.competitors, verifications
+                    )
+
+                    problems = evaluate.run_checks(verified, tools.sources_consulted())
+                    removed = evaluate.drop_fabricated_sources(
+                        verified, tools.sources_consulted())
+                    if removed:
+                        problems.append(f"Removed {removed} fabricated source URL(s).")
+                    # After stripping fabricated URLs above, not before --
+                    # a fake source shouldn't count toward corroboration.
+                    problems += evaluate.check_source_corroboration(verified)
+                    problems += evaluate.check_precise_claims_are_corroborated(verified)
+
+                    status.update(label=f"Found {len(verified)} verified competitor(s)",
+                                  state="complete")
+
+                    st.session_state["research"] = research
+                    st.session_state["verified"] = verified
+                    st.session_state["excluded"] = excluded
+                    st.session_state["problems"] = problems
+                    st.session_state["stage"] = "review"
+
+    except errors.APIError as exc:
+        # Logged unconditionally: Streamlit Cloud's "Manage app" panel
+        # captures stdout, and this is the only trace of a deployed
+        # failure. Discarding it is what made a transient 503 look like a
+        # defect in the report.
+        print(failures.api_error_log_line(exc), flush=True)
+        st.session_state["stage"] = "input"
+        st.error(failures.api_error_message(exc.code))
+
+    except Exception as exc:  # noqa: BLE001 - last resort, and it logs
+        # Anything that is not a provider API error previously reached the
+        # user as a raw traceback: a Tavily failure, a dropped connection,
+        # a missing optional key, or a genuine bug. Streamlit's own
+        # control flow (RerunException, StopException) derives from
+        # BaseException rather than Exception, so it passes through here
+        # untouched.
+        print(failures.unexpected_error_log_line(exc), flush=True)
+        st.session_state["stage"] = "input"
+        st.error(failures.unexpected_error_message())
+
+
 with st.form("company_form"):
     company_name = st.text_input("Company or startup name")
     company_url = st.text_input(
         "Company website or LinkedIn URL (optional, but strongly recommended)",
         help="Anchors identity to a real page instead of guessing from the "
              "name alone -- important for small or common-named companies.",
+    )
+    fresh_identity = st.checkbox(
+        "Re-establish identity",
+        value=False,
+        help="By default, a company researched here before under its own "
+             "domain reuses that identity if it is recent. Tick this to "
+             "look it up live instead, for instance if the company has "
+             "rebranded, moved or been acquired since.",
     )
     submitted = st.form_submit_button("Research")
 
@@ -79,99 +202,45 @@ if submitted:
         tools.reset_sources()
         st.session_state["company_name"] = company_name.strip()
         st.session_state["company_url"] = company_url.strip()
+        st.session_state["allow_recall"] = not fresh_identity
 
-        # This app runs on ONE shared API key for every visitor -- there's no
-        # per-user quota. Free-tier limits are real and we hit them ourselves
-        # during development, so a visitor arriving after the key is already
-        # near its daily cap is an expected case, not a rare edge case. Catch
-        # it here and show a plain message instead of Streamlit's default
-        # crash screen -- retries (in config.py/tools.py/pipeline.py) already
-        # absorbed anything short-lived; an error reaching this point means
-        # they were exhausted, so retrying again immediately won't help.
-        try:
-            with st.status("Identifying the company...", expanded=True) as status:
-                tools.set_progress_hook(status.write)
-                identity, identity_recalled = recall.establish_identity(
-                    st.session_state["company_name"], st.session_state["company_url"]
-                )
-                st.session_state["identity_recalled"] = identity_recalled
-                if identity_recalled:
-                    status.write(
-                        f"Reusing the identity established on "
-                        f"{identity_recalled['run_at'][:10]} "
-                        f"({identity_recalled['age_days']:.0f} days ago)."
-                    )
+        # A name with no URL cannot find its own history, because runs are
+        # filed under a domain. So ask the ledger by name and let the user
+        # confirm; nothing is chosen for them, however few the matches.
+        candidates = ([] if st.session_state["company_url"]
+                      else recall.find_candidates(st.session_state["company_name"]))
 
-                if identity is None:
-                    status.update(label="Could not confirm identity", state="error")
-                    st.session_state["stage"] = "identity_failed"
-                elif not identity.confident_match:
-                    status.update(label="Identity is ambiguous", state="error")
-                    st.session_state["identity"] = identity
-                    st.session_state["stage"] = "identity_ambiguous"
-                else:
-                    status.update(label=f"Confirmed: {identity.description[:80]}...",
-                                   state="complete")
-                    st.session_state["identity"] = identity
-                    st.session_state["stage"] = "researching"
+        if candidates:
+            st.session_state["candidates"] = candidates
+            st.session_state["stage"] = "choose_url"
+        else:
+            research_company()
 
-            if st.session_state["stage"] == "researching":
-                with st.status("Researching competitors...", expanded=True) as status:
-                    tools.set_progress_hook(status.write)
-                    research = pipeline.research_competitors(
-                        st.session_state["company_name"], identity
-                    )
+# --- Remembered websites: memory suggests, the user confirms ---
+if st.session_state["stage"] == "choose_url":
+    st.info(f'You have researched "{st.session_state["company_name"]}" here '
+            f'before.')
+    st.caption("Pick the one you mean and the run continues as if you had "
+               "typed that URL. Each age is shown so you can judge how "
+               "current it is; nothing is selected for you, because two "
+               "unrelated companies can share a name.")
 
-                    if research is None:
-                        status.update(label="Ran out of tool calls before finishing",
-                                       state="error")
-                        st.session_state["stage"] = "research_failed"
-                    else:
-                        status.write("Independently verifying each competitor...")
-                        verifications = pipeline.verify_competitors(
-                            st.session_state["company_name"], identity, research.competitors
-                        )
-                        verified, excluded = pipeline.apply_verifications(
-                            research.competitors, verifications
-                        )
+    for number, candidate in enumerate(st.session_state["candidates"]):
+        if st.button(
+            f"{candidate['website']}  ·  last run "
+            f"{candidate['run_at'][:10]} ({candidate['age_days']:.0f} days ago)",
+            key=f"candidate_{number}",
+        ):
+            st.session_state["company_url"] = candidate["website"]
+            st.session_state["url_remembered"] = candidate
+            st.session_state["candidates"] = None
+            research_company()
+            st.rerun()
 
-                        problems = evaluate.run_checks(verified, tools.sources_consulted())
-                        removed = evaluate.drop_fabricated_sources(verified, tools.sources_consulted())
-                        if removed:
-                            problems.append(f"Removed {removed} fabricated source URL(s).")
-                        # After stripping fabricated URLs above, not before --
-                        # a fake source shouldn't count toward corroboration.
-                        problems += evaluate.check_source_corroboration(verified)
-                        problems += evaluate.check_precise_claims_are_corroborated(verified)
-
-                        status.update(label=f"Found {len(verified)} verified competitor(s)",
-                                      state="complete")
-
-                        st.session_state["research"] = research
-                        st.session_state["verified"] = verified
-                        st.session_state["excluded"] = excluded
-                        st.session_state["problems"] = problems
-                        st.session_state["stage"] = "review"
-
-        except errors.APIError as exc:
-            # Logged unconditionally: Streamlit Cloud's "Manage app" panel
-            # captures stdout, and this is the only trace of a deployed
-            # failure. Discarding it is what made a transient 503 look like a
-            # defect in the report.
-            print(failures.api_error_log_line(exc), flush=True)
-            st.session_state["stage"] = "input"
-            st.error(failures.api_error_message(exc.code))
-
-        except Exception as exc:  # noqa: BLE001 - last resort, and it logs
-            # Anything that is not a provider API error previously reached the
-            # user as a raw traceback: a Tavily failure, a dropped connection,
-            # a missing optional key, or a genuine bug. Streamlit's own
-            # control flow (RerunException, StopException) derives from
-            # BaseException rather than Exception, so it passes through here
-            # untouched.
-            print(failures.unexpected_error_log_line(exc), flush=True)
-            st.session_state["stage"] = "input"
-            st.error(failures.unexpected_error_message())
+    if st.button("None of these", key="candidate_none"):
+        st.session_state["candidates"] = None
+        research_company()
+        st.rerun()
 
 # --- Terminal states: identity failed / ambiguous / research failed ---
 if st.session_state["stage"] == "identity_failed":
@@ -263,6 +332,7 @@ elif st.session_state["stage"] == "review":
                     excluded=final_excluded,
                     sources=tools.sources_consulted(),
                     identity_recalled=st.session_state["identity_recalled"],
+                    url_remembered=st.session_state["url_remembered"],
                 )
 
                 # One ledger entry per run. Streamlit leaves this review UI
@@ -285,6 +355,14 @@ elif st.session_state["stage"] == "review":
                             model=MODEL,
                             retrieval_provider=getattr(
                                 tools.active_provider(), "name", ""),
+                            url_source=(
+                                "remembered"
+                                if st.session_state["url_remembered"]
+                                else "typed" if st.session_state["company_url"]
+                                else "none"),
+                            url_remembered_from=(
+                                st.session_state["url_remembered"]["run_at"]
+                                if st.session_state["url_remembered"] else ""),
                         )
                         st.session_state["run_logged"] = True
                     except OSError as exc:
