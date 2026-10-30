@@ -172,7 +172,7 @@ def main() -> None:
 
     if identity_recalled:
         print(f"\nReusing the identity established on "
-              f"{identity_recalled['run_at'][:10]} "
+              f"{identity_recalled['established_at'][:10]} "
               f"({identity_recalled['age_days']:.0f} days ago). "
               f"Run with {FRESH_IDENTITY_FLAG} to establish it fresh instead.")
 
@@ -245,6 +245,10 @@ def main() -> None:
                         else "typed" if company_url else "none"),
             url_remembered_from=(url_remembered["run_at"] if url_remembered
                                  else ""),
+            # Carried forward, not restamped: an identity must not become
+            # immortal by being reused every few weeks.
+            identity_established_at=(identity_recalled["established_at"]
+                                     if identity_recalled else ""),
         )
         # record_run returns None both when memory is off and when the
         # company could not be keyed. Only the second is worth reporting.

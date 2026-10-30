@@ -99,9 +99,15 @@ def build_report(
             f"website remembered from the run on "
             f"{(url_remembered.get('run_at') or '')[:10]} and confirmed by you")
     if identity_recalled:
+        # The date the identity was ESTABLISHED, not the date of the last run
+        # that reused it. Those differ on every reuse, and the older one is
+        # the honest answer to "how current is this".
+        established = (identity_recalled.get("established_at")
+                       or identity_recalled.get("run_at") or "")[:10]
+        age = identity_recalled.get("age_days")
+        aged = f" ({age:.0f} days before this report)" if age is not None else ""
         memory_notes.append(
-            f"identity reused from the run on "
-            f"{(identity_recalled.get('run_at') or '')[:10]}, not "
+            f"identity established on {established}{aged} and reused, not "
             f"re-established for this report")
     if memory_notes:
         lines.append(f"- **From memory:** {'; '.join(memory_notes)}")

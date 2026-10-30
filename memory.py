@@ -42,10 +42,10 @@ import os
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-# 2 added url_source and url_remembered_from. Older lines simply lack those
-# fields, and every read here uses .get, so a version 1 ledger stays
-# readable rather than needing a migration.
-SCHEMA_VERSION = 2
+# 2 added url_source and url_remembered_from. 3 added identity_established_at.
+# Older lines simply lack those fields, and every read here uses .get with a
+# fallback, so a version 1 or 2 ledger stays readable without a migration.
+SCHEMA_VERSION = 3
 
 LEDGER_PATH_ENV = "MEMORY_PATH"
 
@@ -241,6 +241,7 @@ def build_record(
     retrieval_provider: str = "",
     url_source: str = "",
     url_remembered_from: str = "",
+    identity_established_at: str = "",
     run_at: str | None = None,
 ) -> dict:
     """Assemble one ledger record. Pure: no file access, and no clock if
@@ -258,6 +259,7 @@ def build_record(
     key, key_is_strong = canonical_key(
         getattr(identity, "website", None) or company_url, company_name,
     )
+    stamped_at = run_at or _utc_now()
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -265,7 +267,16 @@ def build_record(
         "key_is_strong": key_is_strong,
         "company_name": company_name,
         "company_url": company_url or "",
-        "run_at": run_at or _utc_now(),
+        "run_at": stamped_at,
+        # When the identity in this record was LAST ESTABLISHED LIVE, which
+        # is this run only if the identify step actually ran. Callers copy
+        # the original date forward when they reuse one.
+        #
+        # Without this, age could only be measured from run_at, and since
+        # every completed run writes a record, each reuse reset the age to
+        # zero. An identity would be reused forever and every report would
+        # claim it was established today. Found by test, not in production.
+        "identity_established_at": identity_established_at or stamped_at,
         "identity": {
             "description": getattr(identity, "description", "") or "",
             "location": getattr(identity, "location", None),
@@ -355,6 +366,25 @@ def record_age_days(record: dict, now: datetime | None = None) -> float | None:
     return ((now or datetime.now(timezone.utc)) - stored).total_seconds() / 86400
 
 
+def identity_established_at(record: dict) -> str:
+    """When this record's identity was last established live.
+
+    Falls back to run_at for ledger lines written before schema 3, where
+    the two were the same thing for any record the identify step produced.
+    """
+    return record.get("identity_established_at") or record.get("run_at") or ""
+
+
+def identity_age_days(record: dict, now: datetime | None = None) -> float | None:
+    """How old the IDENTITY in a record is, not how old the record is.
+
+    These differ on every reused identity, and only this one bounds how
+    long a stale description can survive.
+    """
+    return record_age_days(
+        {"run_at": identity_established_at(record)}, now)
+
+
 def recall_identity(
     key: str,
     path: str | None = None,
@@ -380,7 +410,10 @@ def recall_identity(
         if not identity.get("description"):
             continue
 
-        age = record_age_days(record, now)
+        # Measured from when the identity was established, never from when
+        # this record was written: a reused identity writes a fresh record,
+        # and measuring from that would renew the limit on every run.
+        age = identity_age_days(record, now)
         if age is None or age > max_age_days:
             continue
 
@@ -388,6 +421,10 @@ def recall_identity(
             "description": identity["description"],
             "location": identity.get("location"),
             "website": identity.get("website"),
+            # When the identity itself was established, which is the date
+            # worth showing a user, and what a later reuse copies forward.
+            "established_at": identity_established_at(record),
+            # When the run that last used it happened.
             "run_at": record.get("run_at", ""),
             "age_days": age,
             "key_is_strong": bool(record.get("key_is_strong")),

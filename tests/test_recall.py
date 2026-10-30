@@ -427,10 +427,21 @@ class Disclosure(unittest.TestCase):
         self.assertNotIn("From memory:", self.report())
 
     def test_a_reused_identity_is_dated(self):
-        content = self.report(
-            identity_recalled={"run_at": "2026-10-24T09:00:00Z"})
+        content = self.report(identity_recalled={
+            "established_at": "2026-10-24T09:00:00Z",
+            "run_at": "2026-10-29T09:00:00Z", "age_days": 6.0})
         self.assertIn("From memory:", content)
-        self.assertIn("identity reused from the run on 2026-10-24", content)
+        self.assertIn("identity established on 2026-10-24", content)
+        self.assertIn("6 days before this report", content)
+
+    def test_the_report_dates_the_identity_not_the_last_reuse(self):
+        """The record that supplied it may be days old while the identity in
+        it is months old. The report must name the older date."""
+        content = self.report(identity_recalled={
+            "established_at": "2026-05-01T09:00:00Z",
+            "run_at": "2026-10-29T09:00:00Z", "age_days": 182.0})
+        self.assertIn("2026-05-01", content)
+        self.assertNotIn("2026-10-29", content)
 
     def test_both_kinds_of_reuse_share_one_line(self):
         content = self.report(

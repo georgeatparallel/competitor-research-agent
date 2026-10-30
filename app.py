@@ -98,7 +98,7 @@ def research_company() -> None:
             if identity_recalled:
                 status.write(
                     f"Reusing the identity established on "
-                    f"{identity_recalled['run_at'][:10]} "
+                    f"{identity_recalled['established_at'][:10]} "
                     f"({identity_recalled['age_days']:.0f} days ago). Tick "
                     f"\"Re-establish identity\" above to check it live instead."
                 )
@@ -282,9 +282,10 @@ elif st.session_state["stage"] == "review":
     # should know the identity underneath them was not checked today.
     if st.session_state["identity_recalled"]:
         st.caption(
-            "Identity reused from a run on "
-            f"{st.session_state['identity_recalled']['run_at'][:10]}, "
-            "not re-established today."
+            "Identity established on "
+            f"{st.session_state['identity_recalled']['established_at'][:10]} "
+            f"({st.session_state['identity_recalled']['age_days']:.0f} days "
+            "ago) and reused, not re-established today."
         )
 
     if problems:
@@ -363,6 +364,13 @@ elif st.session_state["stage"] == "review":
                             url_remembered_from=(
                                 st.session_state["url_remembered"]["run_at"]
                                 if st.session_state["url_remembered"] else ""),
+                            # Carried forward, not restamped: an identity
+                            # must not become immortal by being reused.
+                            identity_established_at=(
+                                st.session_state["identity_recalled"]
+                                ["established_at"]
+                                if st.session_state["identity_recalled"]
+                                else ""),
                         )
                         st.session_state["run_logged"] = True
                     except OSError as exc:

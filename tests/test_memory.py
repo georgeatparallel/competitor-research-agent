@@ -531,6 +531,79 @@ class Recall(unittest.TestCase):
         self.assertEqual(self.recall()["run_at"], stamp(4))
 
 
+class IdentityAge(unittest.TestCase):
+    """An identity must not become immortal by being reused.
+
+    Each reuse writes a new record carrying the OLD identity but a fresh
+    run_at. If age is measured from run_at, a founder who runs every 28 days
+    renews the 30-day limit on every run and keeps a years-old identity
+    forever, while every report claims it was established days ago.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = os.path.join(self.directory.name, "memory.jsonl")
+
+    def write(self, days_ago, description="Workspace tool", **kwargs):
+        return memory.record_run(
+            path=self.path, company_name="Notion", run_at=stamp(days_ago),
+            identity=identity("https://notion.so", description=description),
+            **kwargs)
+
+    def test_a_reused_identity_keeps_its_original_age(self):
+        # Day -29: a live identify establishes the identity.
+        self.write(29)
+
+        # Day 0: 29 days old, so it is reused, and that run writes its own
+        # record carrying the same identity.
+        reused = memory.recall_identity("notion.so", self.path, now=NOW)
+        self.assertIsNotNone(reused, "29 days should still be reusable")
+        self.write(0, identity_established_at=reused["run_at"])
+
+        # Day +29: the newest record is 29 days old, but the identity inside
+        # it was established 58 days ago.
+        later = NOW + timedelta(days=29)
+        self.assertIsNone(
+            memory.recall_identity("notion.so", self.path, now=later),
+            "a 58-day-old identity was reused because the reuse record "
+            "looked fresh",
+        )
+
+    def test_the_reported_age_is_the_identitys_own(self):
+        """Still reusable, but reported as its true age rather than zero."""
+        self.write(20)
+        reused = memory.recall_identity("notion.so", self.path, now=NOW)
+        self.write(0, identity_established_at=reused["established_at"])
+
+        later = NOW + timedelta(days=5)
+        recalled = memory.recall_identity("notion.so", self.path, now=later)
+        self.assertIsNotNone(recalled, "25 days is still within the limit")
+        self.assertAlmostEqual(recalled["age_days"], 25.0, places=3,
+                               msg="age must count from the live identify")
+        self.assertEqual(recalled["established_at"], stamp(20))
+        self.assertEqual(recalled["run_at"], stamp(0),
+                         "the record is still dated when the run happened")
+
+    def test_an_old_ledger_line_falls_back_to_its_run_date(self):
+        """Schema 1 and 2 lines have no identity_established_at. For a record
+        the identify step produced, run_at was the same thing."""
+        record = memory.build_record(
+            company_name="Notion", identity=identity("https://notion.so"),
+            run_at=stamp(3))
+        del record["identity_established_at"]
+        memory.append_record(record, self.path)
+
+        recalled = memory.recall_identity("notion.so", self.path, now=NOW)
+        self.assertIsNotNone(recalled)
+        self.assertAlmostEqual(recalled["age_days"], 3.0, places=3)
+        self.assertEqual(recalled["established_at"], stamp(3))
+
+    def test_a_live_identify_stamps_both_dates_the_same(self):
+        record = self.write(0)
+        self.assertEqual(record["identity_established_at"], record["run_at"])
+
+
 class Ages(unittest.TestCase):
     def test_age_is_measured_in_days(self):
         record = {"run_at": stamp(2.5)}
