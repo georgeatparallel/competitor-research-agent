@@ -291,6 +291,8 @@ report.py      Markdown generation, with corroboration labels inline
 config.py      Clients, model choice, retry policy
 memory.py      The run ledger: a stable key per company, and one appended
                JSON line per finished run
+recall.py      Where memory meets the pipeline: when a stored identity may
+               replace the identify step, and when it may not
 ```
 
 Prompts live in their own file deliberately: in an LLM application, most iteration happens in prompt text rather than code, so it should be easy to read and compare.
@@ -310,6 +312,18 @@ Three things about it are deliberate.
 **Automatic and human exclusions are stored separately.** The report does not care who rejected a candidate, but a reviewer's choice is evidence of what this user wants and a verification rejection is not — so the two are never merged in storage.
 
 Writes are best-effort: a ledger failure is logged and the report still reaches the user.
+
+### Reusing an identity
+
+Establishing which company is meant costs an LLM call and up to two searches, and for a company researched before under its own domain that answer already exists. `recall.py` reuses it, under two conditions.
+
+**Only a strong key.** A weak key gets no memory at all, not even as a hint: a name can mean a different company next month, and offering the model a past run's guess would bias it toward repeating a misidentification on exactly the ambiguous names the pipeline is supposed to stop on.
+
+**Only recently.** Older than `RECALL_MAX_AGE_DAYS` (30) and the identity is re-established, because companies rebrand, move and get acquired, and every later step is told which company it is researching. A record whose timestamp cannot be parsed counts as unknown rather than current, so it is refused too.
+
+A reused identity is labelled with the date it was established, in the terminal, in the web UI and in the report. A cached claim otherwise reads exactly like one checked today.
+
+`recall.py` sits above `pipeline.py` rather than inside it, which is what keeps the evaluation harness honest: `run_eval.py` calls `pipeline.identify_company` directly, so no stored history can influence a benchmark. That property comes from the layering rather than from a flag someone has to remember to set.
 
 ---
 

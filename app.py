@@ -31,6 +31,7 @@ from google.genai import errors
 import evaluate
 import memory
 import pipeline
+import recall
 import report as report_module
 import tools
 from config import MODEL
@@ -45,7 +46,8 @@ st.caption(
 
 # --- one-time state so a rerun (checkbox click, etc.) doesn't lose results ---
 for key in ("stage", "identity", "research", "verified", "excluded", "problems",
-            "company_name", "company_url", "report_text", "run_logged"):
+            "company_name", "company_url", "report_text", "run_logged",
+            "identity_recalled"):
     st.session_state.setdefault(key, None)
 if st.session_state["stage"] is None:
     st.session_state["stage"] = "input"
@@ -54,7 +56,7 @@ if st.session_state["stage"] is None:
 def reset() -> None:
     """Clear everything so a new company starts from a clean slate."""
     for key in ("identity", "research", "verified", "excluded", "problems",
-                "report_text", "run_logged"):
+                "report_text", "run_logged", "identity_recalled"):
         st.session_state[key] = None
     st.session_state["stage"] = "input"
 
@@ -89,9 +91,16 @@ if submitted:
         try:
             with st.status("Identifying the company...", expanded=True) as status:
                 tools.set_progress_hook(status.write)
-                identity = pipeline.identify_company(
+                identity, identity_recalled = recall.establish_identity(
                     st.session_state["company_name"], st.session_state["company_url"]
                 )
+                st.session_state["identity_recalled"] = identity_recalled
+                if identity_recalled:
+                    status.write(
+                        f"Reusing the identity established on "
+                        f"{identity_recalled['run_at'][:10]} "
+                        f"({identity_recalled['age_days']:.0f} days ago)."
+                    )
 
                 if identity is None:
                     status.update(label="Could not confirm identity", state="error")
@@ -200,6 +209,15 @@ elif st.session_state["stage"] == "review":
         + (f" · Website: {identity.website}" if identity.website else "")
     )
 
+    # Shown here as well as in the report: someone reviewing competitors
+    # should know the identity underneath them was not checked today.
+    if st.session_state["identity_recalled"]:
+        st.caption(
+            "Identity reused from a run on "
+            f"{st.session_state['identity_recalled']['run_at'][:10]}, "
+            "not re-established today."
+        )
+
     if problems:
         st.warning("Automatic checks flagged:\n" + "\n".join(f"- {p}" for p in problems))
 
@@ -244,6 +262,7 @@ elif st.session_state["stage"] == "review":
                     competitors=final,
                     excluded=final_excluded,
                     sources=tools.sources_consulted(),
+                    identity_recalled=st.session_state["identity_recalled"],
                 )
 
                 # One ledger entry per run. Streamlit leaves this review UI

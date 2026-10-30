@@ -68,6 +68,7 @@ def build_report(
     competitors: list[Competitor],
     excluded: list[tuple[str, str]],
     sources: list[str],
+    identity_recalled: dict | None = None,
 ) -> str:
     lines: list[str] = [
         f"# Competitor Research: {company_name}",
@@ -84,6 +85,17 @@ def build_report(
         lines.append(f"- **Website:** {identity.website}")
     if company_url:
         lines.append(f"- **Identity anchored to:** {company_url}")
+
+    # A reused identity has to carry its date. Without this line a fact
+    # established weeks ago reads exactly like one checked today, which is
+    # the opposite of what the rest of this report is for.
+    if identity_recalled:
+        established = (identity_recalled.get("run_at") or "")[:10]
+        lines.append(
+            f"- **Identity:** reused from an earlier run"
+            + (f" on {established}" if established else "")
+            + ", not re-established for this report"
+        )
     lines += ["", f"## Competitors ({len(competitors)})", ""]
 
     for competitor in competitors:

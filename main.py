@@ -16,6 +16,7 @@ import sys
 import evaluate
 import memory
 import pipeline
+import recall
 import report as report_module
 from config import MODEL
 from schemas import Competitor
@@ -95,8 +96,10 @@ def main() -> None:
         "Company website or LinkedIn URL (optional, press Enter to skip): "
     )
 
-    # Step 0 — which company do we actually mean?
-    identity = pipeline.identify_company(company_name, company_url)
+    # Step 0 — which company do we actually mean? A company researched
+    # before under its own domain can reuse that answer; see recall.py for
+    # when it may not.
+    identity, identity_recalled = recall.establish_identity(company_name, company_url)
 
     if identity is None:
         sys.exit("Could not confirm the company's identity within the allowed tool calls.")
@@ -108,6 +111,11 @@ def main() -> None:
         print(f"\nWhy it's ambiguous: {identity.ambiguity_note}")
         print("\nStopping here rather than guessing which company you meant.")
         sys.exit("Try again with a more specific name, or pass the company's URL.")
+
+    if identity_recalled:
+        print(f"\nReusing the identity established on "
+              f"{identity_recalled['run_at'][:10]} "
+              f"({identity_recalled['age_days']:.0f} days ago).")
 
     print(f"\nConfirmed: {identity.description}")
     print(f"Location: {identity.location or 'not established'}"
@@ -154,6 +162,7 @@ def main() -> None:
         competitors=final,
         excluded=excluded,
         sources=sources_consulted(),
+        identity_recalled=identity_recalled,
     )
     filename = report_module.save_report(company_name, content)
 
